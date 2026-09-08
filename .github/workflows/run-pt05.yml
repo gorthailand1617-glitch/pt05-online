@@ -1,0 +1,65 @@
+name: Run PT05 Extraction & Attendance Risk Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      term:
+        description: 'ภาคเรียน (Term)'
+        required: true
+        default: '1'
+      year:
+        description: 'ปีการศึกษา (Academic Year)'
+        required: true
+        default: '2569'
+
+jobs:
+  run-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Prepare Teachers Data
+      env:
+        TEACHERS_CSV_SECRET: ${{ secrets.TEACHERS_CSV }}
+      run: |
+        if [ -n "$TEACHERS_CSV_SECRET" ]; then
+          echo "$TEACHERS_CSV_SECRET" > teachers.csv
+          echo "Using teachers.csv from GitHub Secret."
+        elif [ -f "teachers.csv" ]; then
+          echo "Using local teachers.csv"
+        elif [ -f "tools/teachers.sample.csv" ]; then
+          cp tools/teachers.sample.csv teachers.csv
+          echo "Using tools/teachers.sample.csv"
+        else
+          echo "Error: No teachers credentials available!"
+          exit 1
+        fi
+
+    - name: Run PT05 and Attendance Risk Analysis
+      run: |
+        python tools/pt05_tool.py \
+          --teachers teachers.csv \
+          --template pt05.docx \
+          --out output-pt05 \
+          --term "${{ github.event.inputs.term }}" \
+          --year "${{ github.event.inputs.year }}" \
+          --save-raw
+
+    - name: Upload Output Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: PT05_Output_Term${{ github.event.inputs.term }}_${{ github.event.inputs.year }}
+        path: output-pt05/
