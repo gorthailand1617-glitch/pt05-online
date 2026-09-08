@@ -199,53 +199,77 @@ def parse_teachers_raw_text(text: str) -> list[dict[str, str]]:
             results.append({"username": parts[0], "password": parts[1]})
     return results
 
+def get_sample_teachers() -> list[dict[str, str]]:
+    sample_file = TOOLS_DIR / "teachers.sample.csv"
+    if sample_file.exists():
+        return parse_teachers_csv(sample_file.read_text(encoding="utf-8-sig", errors="replace"))
+    return [
+        {"username": "ptn101", "password": "101"},
+        {"username": "ptn102", "password": "102"},
+        {"username": "ptn103", "password": "303"},
+    ]
+
 # -------------------------------------------------------------
-# หน้าหลัก: แท็บป้อนข้อมูลครูและเทมเพลต
+# หน้าหลัก: ส่วนกำหนดรายชื่อครูและเทมเพลต
 # -------------------------------------------------------------
 col1, col2 = st.columns([3, 2])
 
+teachers_to_process: list[dict[str, str]] = []
+
 with col1:
     st.subheader("1️⃣ กำหนดรายชื่อครูที่ต้องการตรวจ")
-    tab_upload, tab_paste, tab_sample = st.tabs(["📁 อัปโหลดไฟล์ CSV", "✍️ พิมพ์หรือวางข้อความ", "🧪 ใช้ข้อมูลตัวอย่าง"])
+    
+    input_method = st.radio(
+        "เลือกวิธีระบุรายชื่อครู:",
+        [
+            "🧪 ใช้รายชื่อตัวอย่างในระบบ (พร้อมทดสอบทันที)",
+            "📁 อัปโหลดไฟล์ teachers.csv",
+            "✍️ พิมพ์หรือวางข้อความ (Username, Password)",
+        ],
+        index=0,
+        horizontal=False,
+    )
 
-    teachers_to_process: list[dict[str, str]] = []
+    if input_method == "🧪 ใช้รายชื่อตัวอย่างในระบบ (พร้อมทดสอบทันที)":
+        teachers_to_process = get_sample_teachers()
+        st.info(f"💡 โหลดรายชื่อตัวอย่างมาตรฐานแล้ว **{len(teachers_to_process)} บัญชี** (พร้อมกดปุ่มเริ่มทำงานด้านล่างได้ทันที)")
 
-    with tab_upload:
+    elif input_method == "📁 อัปโหลดไฟล์ teachers.csv":
         uploaded_csv = st.file_uploader("เลือกไฟล์ teachers.csv", type=["csv"], key="csv_upload")
         if uploaded_csv is not None:
             content = uploaded_csv.getvalue().decode("utf-8-sig", errors="replace")
             teachers_to_process = parse_teachers_csv(content)
             if not teachers_to_process:
                 teachers_to_process = parse_teachers_raw_text(content)
-            st.success(f"ตรวจพบข้อมูลครูทั้งหมด {len(teachers_to_process)} บัญชี")
+            if teachers_to_process:
+                st.success(f"✅ ตรวจพบข้อมูลครูในไฟล์ทั้งหมด **{len(teachers_to_process)} บัญชี**")
+            else:
+                st.warning("⚠️ ไฟล์ CSV ไม่มีข้อมูล หรือรูปแบบไม่ถูกต้อง (ต้องการหัวคอลัมน์ username,password)")
+        else:
+            st.caption("กรุณาเลือกไฟล์ CSV จากเครื่องของคุณ หรือดาวน์โหลดแบบฟอร์มเปล่าได้ที่คอลัมน์ขวามือ")
 
-    with tab_paste:
-        st.caption("รูปแบบ: `username,password` บรรทัดละ 1 บัญชี (เช่น `ptn101,101`)")
+    elif input_method == "✍️ พิมพ์หรือวางข้อความ (Username, Password)":
+        st.caption("พิมพ์หรือวางข้อมูลรูปแบบ `username,password` บรรทัดละ 1 บัญชี")
         pasted_text = st.text_area(
             "วางข้อมูลบัญชีครูที่นี่",
-            height=130,
-            placeholder="ptn101,101\nptn102,102\nptn103,103",
+            value="ptn101,101\nptn102,102\nptn103,303",
+            height=120,
         )
         if pasted_text.strip():
-            parsed = parse_teachers_raw_text(pasted_text)
-            if parsed:
-                teachers_to_process = parsed
-                st.info(f"ตรวจพบบัญชีครูจากข้อความ {len(teachers_to_process)} บัญชี")
+            teachers_to_process = parse_teachers_raw_text(pasted_text)
+            if teachers_to_process:
+                st.info(f"ตรวจพบบัญชีครูจากข้อความ **{len(teachers_to_process)} บัญชี**")
 
-    with tab_sample:
-        st.write("กดปุ่มเพื่อโหลดบัญชีครูตัวอย่าง (Sample) สำหรับทดสอบระบบ")
-        if st.button("โหลดบัญชีตัวอย่าง (Sample Teachers)"):
-            sample_file = TOOLS_DIR / "teachers.sample.csv"
-            if sample_file.exists():
-                teachers_to_process = parse_teachers_csv(sample_file.read_text(encoding="utf-8-sig", errors="replace"))
-                st.success(f"โหลดข้อมูลตัวอย่างแล้ว {len(teachers_to_process)} บัญชี")
-            else:
-                st.warning("ไม่พบไฟล์ teachers.sample.csv")
-
+    # ตัวเลือกจำกัดจำนวนบัญชีเพื่อทดสอบรวดเร็ว
     if teachers_to_process:
+        limit_run = st.checkbox("⚡ โหมดทดสอบรวดเร็ว (ดึงเฉพาะ 1-2 บัญชีแรก)", value=False)
+        if limit_run:
+            teachers_to_process = teachers_to_process[:2]
+
         df_preview = pd.DataFrame(teachers_to_process)
-        with st.expander(f"👁️ ดูรายชื่อครูที่จะประมวลผล ({len(teachers_to_process)} คน)", expanded=False):
+        with st.expander(f"👁️ ตรวจสอบรายชื่อที่จะประมวลผล ({len(teachers_to_process)} บัญชี)", expanded=False):
             st.dataframe(df_preview, use_container_width=True, hide_index=True)
+
 
 with col2:
     st.subheader("2️⃣ เทมเพลต Word ปถ.05 (.docx)")
@@ -276,7 +300,16 @@ st.divider()
 # -------------------------------------------------------------
 # 3️⃣ ปุ่มสั่งประมวลผล
 # -------------------------------------------------------------
-start_btn = st.button("🚀 เริ่มประมวลผลดึงข้อมูล (Start Processing)", type="primary", use_container_width=True)
+if teachers_to_process and custom_template_bytes:
+    st.success(f"🟢 **ระบบพร้อมทำงาน:** มีรายชื่อครู **{len(teachers_to_process)}** บัญชี • เทมเพลต Word พร้อม • ภาคเรียน {term}/{year}")
+    button_label = f"🚀 เริ่มประมวลผลดึงข้อมูล ({len(teachers_to_process)} บัญชี)"
+    button_disabled = False
+else:
+    st.warning("🟡 **ยังไม่พร้อมทำงาน:** กรุณาเลือกวิธีระบุรายชื่อครูในข้อ 1 ด้านบนก่อน")
+    button_label = "🚀 เริ่มประมวลผลดึงข้อมูล (กรุณาระบุรายชื่อครูก่อน)"
+    button_disabled = True
+
+start_btn = st.button(button_label, type="primary", disabled=button_disabled, use_container_width=True)
 
 if start_btn:
     if not teachers_to_process:
@@ -285,6 +318,7 @@ if start_btn:
     if not custom_template_bytes:
         st.error("กรุณาระบุไฟล์เทมเพลต pt05.docx")
         st.stop()
+
 
     # สร้าง Working Directory ชั่วคราว
     temp_dir = tempfile.mkdtemp(prefix="pt05_online_")
