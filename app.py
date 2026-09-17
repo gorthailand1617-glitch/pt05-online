@@ -543,11 +543,16 @@ with main_tab2:
                 help="ขอรับฟรี API Key ได้ที่ aistudio.google.com หากเว้นว่างไว้ ระบบจะใช้เอนจินภายในดึงข้อมูลสดให้อัตโนมัติ",
             )
         with c_set2:
-            gemini_model = st.selectbox(
-                "🤖 โมเดล AI",
-                ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.5-pro"],
+            model_choice = st.selectbox(
+                "🤖 โมเดล AI (Gemini 3.1+ / 3.7)",
+                ["gemini-3.7-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview", "กำหนดเอง (Custom)..."],
                 index=0,
+                help="Gemini 3.1+ / 3.7 เป็นโมเดลเจเนอเรชันปัจจุบัน (gemini-3.7-flash แนะนำเร็วและแม่นยำที่สุด)",
             )
+            if model_choice == "กำหนดเอง (Custom)...":
+                gemini_model = st.text_input("ระบุชื่อโมเดล", value="gemini-3.7-flash")
+            else:
+                gemini_model = model_choice
         st.caption("💡 **หมายเหตุ:** หากไม่มี API Key ระบบจะใช้ระบบค้นหาอัจฉริยะดึงข้อมูลสดจากระบบ SSS ตอบให้เหมือนกัน 100%")
 
     # แผงคำถามด่วน (Quick Prompts)

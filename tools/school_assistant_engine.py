@@ -580,7 +580,7 @@ class SchoolAssistantEngine:
         self,
         query: str,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-2.5-flash",
+        model_name: str = "gemini-3.7-flash",
         chat_history: Optional[list[dict[str, Any]]] = None,
     ) -> str:
         """
