@@ -1,0 +1,102 @@
+openapi: 3.1.0
+info:
+  title: School AI Assistant API (โรงเรียนเปรมติณสูลานนท์)
+  description: ระบบเชื่อมต่อข้อมูลสารสนเทศโรงเรียนเปรมติณสูลานนท์ สำหรับ ChatGPT Custom GPTs และ Gemini Spark
+  version: 1.0.0
+servers:
+  - url: http://localhost:8000
+    description: Local Server (หรือเปลี่ยนเป็น Cloudflare Tunnel URL เช่น https://xxxx.trycloudflare.com)
+paths:
+  /api/teacher/schedule:
+    get:
+      operationId: getTeacherSchedule
+      summary: ดึงข้อมูลตารางสอนของครู
+      description: สอบถามว่าครูสอนวิชาอะไร คาบไหน ห้องไหน ในวันใดวันหนึ่ง เช่น วันนี้คาบแรกสอนวิชาอะไร ม.ไหน
+      parameters:
+        - name: teacher
+          in: query
+          required: false
+          schema:
+            type: string
+            default: ptn101
+          description: ชื่อครู หรือ username เช่น 'สถิตย์', 'ptn101'
+        - name: day
+          in: query
+          required: false
+          schema:
+            type: string
+          description: วัน เช่น 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัสบดี', 'ศุกร์' (ถ้าไม่ระบุใช้วันปัจจุบัน)
+        - name: period
+          in: query
+          required: false
+          schema:
+            type: string
+          description: คาบที่ต้องการ เช่น 'ชม.1', '1', 'คาบแรก'
+      responses:
+        '200':
+          description: ข้อมูลตารางสอนสำเร็จ
+  /api/attendance/daily:
+    get:
+      operationId: getDailyAttendanceSummary
+      summary: สรุปภาพรวมสถิตินักเรียนมาเรียนทั้งโรงเรียน
+      description: ตรวจสอบจำนวนนักเรียนมาเรียน ขาดเรียน ลา มาสาย และสรุปรายห้องของทั้งโรงเรียนประจำวัน
+      parameters:
+        - name: date
+          in: query
+          required: false
+          schema:
+            type: string
+          description: วันที่ เช่น '2026-09-17' (ถ้าไม่ระบุใช้วันปัจจุบัน)
+      responses:
+        '200':
+          description: สรุปการมาเรียนสำเร็จ
+  /api/attendance/assembly-absent:
+    get:
+      operationId: getMorningAssemblyAbsent
+      summary: ดูรายชื่อนักเรียนที่ขาดแถวหน้าเสาธงรายห้อง
+      description: ตรวจสอบว่าในห้องเรียนที่ระบุ มีนักเรียนคนใดขาดแถว ลา หรือมาสาย
+      parameters:
+        - name: room
+          in: query
+          required: true
+          schema:
+            type: string
+          description: ห้องเรียน เช่น 'ม.3/1', 'ม.4/1', '3/1'
+        - name: date
+          in: query
+          required: false
+          schema:
+            type: string
+          description: วันที่ เช่น '17/09/2569'
+      responses:
+        '200':
+          description: รายชื่อนักเรียนที่ไม่มาแถว
+  /api/class/schedule:
+    get:
+      operationId: getClassSchedule
+      summary: ดูตารางเรียนของห้องเรียน
+      description: ตรวจสอบว่าห้องเรียนนั้นๆ มีเรียนวิชาอะไรในแต่ละคาบ
+      parameters:
+        - name: room
+          in: query
+          required: true
+          schema:
+            type: string
+          description: ห้องเรียน เช่น 'ม.3/1'
+        - name: day
+          in: query
+          required: false
+          schema:
+            type: string
+          description: วัน เช่น 'จันทร์', 'อังคาร'
+      responses:
+        '200':
+          description: ตารางเรียนของห้อง
+  /api/attendance/risk:
+    get:
+      operationId: getAttendanceRiskStudents
+      summary: ดูรายชื่อนักเรียนที่เสี่ยง มส.
+      description: สรุปนักเรียนที่มีเวลาเรียนต่ำกว่า 80% และ 60%
+      responses:
+        '200':
+          description: รายชื่อนักเรียนกลุ่มเสี่ยง

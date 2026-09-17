@@ -42,6 +42,7 @@ try:
         export_html_dashboard,
         export_json as export_risk_json,
     )
+    from school_assistant_engine import SchoolAssistantEngine
 except ImportError as err:
     st.error(f"ไม่สามารถโหลดโมดูลระบบได้: {err}")
     st.stop()
@@ -140,6 +141,26 @@ if "zip_buffer" not in st.session_state:
     st.session_state.zip_buffer = None
 if "run_logs" not in st.session_state:
     st.session_state.run_logs = []
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = [
+        {
+            "role": "assistant",
+            "content": (
+                "สวัสดีครับคุณครู! ผมคือ **เลขาฯ AI ประจำโรงเรียนเปรมติณสูลานนท์** 👩‍💼\n\n"
+                "ผมสามารถช่วยดึงข้อมูลสดจากระบบ SSS ให้คุณครูได้ทันที เช่น:\n"
+                "- 📅 *'วันนี้คาบแรกฉันสอนวิชาอะไร ม.ไหน'*\n"
+                "- 🚩 *'วันนี้ ห้อง ม.3/1 ใครขาดแถวบ้าง'*\n"
+                "- 🏫 *'วันนี้มีนักเรียนมาโรงเรียนกี่คน สรุปภาพรวม'*\n"
+                "- ⚠️ *'มีนักเรียนคนไหนที่เสี่ยง มส. บ้าง'*\n"
+                "- 📖 *'วันนี้ห้อง ม.3/1 มีเรียนวิชาอะไรบ้าง'*\n\n"
+                "พิมพ์คำถามหรือคลิกเลือกคำถามด่วนด้านล่างได้เลยครับ 👇"
+            ),
+        }
+    ]
+if "school_engine" not in st.session_state:
+    st.session_state.school_engine = SchoolAssistantEngine()
+if "quick_prompt" not in st.session_state:
+    st.session_state.quick_prompt = None
 
 # -------------------------------------------------------------
 # Sidebar: แผงควบคุมและการตั้งค่า
@@ -210,9 +231,16 @@ def get_sample_teachers() -> list[dict[str, str]]:
     ]
 
 # -------------------------------------------------------------
-# หน้าหลัก: ส่วนกำหนดรายชื่อครูและเทมเพลต
+# หน้าหลัก: แบ่งแท็บการทำงาน
 # -------------------------------------------------------------
-col1, col2 = st.columns([3, 2])
+main_tab1, main_tab2, main_tab3 = st.tabs([
+    "📋 ตรวจ ปถ.05 และวิเคราะห์เวลาเรียน",
+    "🤖 เลขาฯ AI ประจำโรงเรียน",
+    "🔌 เชื่อมต่อ ChatGPT Custom GPT & API",
+])
+
+with main_tab1:
+    col1, col2 = st.columns([3, 2])
 
 teachers_to_process: list[dict[str, str]] = []
 
@@ -488,11 +516,200 @@ if st.session_state.processed_data is not None:
         st.subheader("📊 แดชบอร์ดสรุปนักเรียนกลุ่มเสี่ยงเวลาเรียนแบบ Interactive")
         components.html(data["dashboard_html"], height=800, scrolling=True)
 
+# -------------------------------------------------------------
+# แท็บที่ 2: เลขาฯ AI ประจำโรงเรียน (School AI Secretary)
+# -------------------------------------------------------------
+with main_tab2:
+    st.markdown(
+        """
+        <div style="background: linear-gradient(135deg, #0f766e 0%, #06b6d4 100%); color: white; padding: 20px 24px; border-radius: 14px; margin-bottom: 20px;">
+            <h3 style="margin: 0 0 6px 0; color: white;">👩‍💼 เลขาฯ AI ประจำโรงเรียนเปรมติณสูลานนท์</h3>
+            <p style="margin: 0; font-size: 14px; color: #ccfbf1;">
+                ผู้ช่วยอัจฉริยะสอบถามข้อมูลสดแบบ Real-time: ตารางสอนคุณครู, การเข้าแถวหน้าเสาธง, สถิติการมาเรียน, ตารางเรียนห้อง, นักเรียนเสี่ยง มส.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # แผงตั้งค่า AI
+    with st.expander("⚙️ ตั้งค่าระบบ AI (Google Gemini API / Fast Engine)", expanded=False):
+        c_set1, c_set2 = st.columns([3, 2])
+        with c_set1:
+            gemini_api_key = st.text_input(
+                "🔑 Google Gemini API Key (ไม่บังคับ)",
+                type="password",
+                value=os.environ.get("GEMINI_API_KEY", ""),
+                help="ขอรับฟรี API Key ได้ที่ aistudio.google.com หากเว้นว่างไว้ ระบบจะใช้เอนจินภายในดึงข้อมูลสดให้อัตโนมัติ",
+            )
+        with c_set2:
+            gemini_model = st.selectbox(
+                "🤖 โมเดล AI",
+                ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.5-pro"],
+                index=0,
+            )
+        st.caption("💡 **หมายเหตุ:** หากไม่มี API Key ระบบจะใช้ระบบค้นหาอัจฉริยะดึงข้อมูลสดจากระบบ SSS ตอบให้เหมือนกัน 100%")
+
+    # แผงคำถามด่วน (Quick Prompts)
+    st.markdown("##### ⚡ คำถามด่วนที่พบบ่อย (คลิกเพื่อถามทันที)")
+    qp1, qp2, qp3, qp4, qp5 = st.columns(5)
+    
+    selected_prompt = None
+    if qp1.button("📅 คาบแรกฉันสอนอะไร", use_container_width=True):
+        selected_prompt = "วันนี้คาบแรกฉันสอนวิชาอะไร ม.ไหน"
+    if qp2.button("🚩 ม.3/1 ใครขาดแถว", use_container_width=True):
+        selected_prompt = "วันนี้ ห้อง ม.3/1 ใครขาดแถวบ้าง"
+    if qp3.button("🏫 วันนี้มา ร.ร. กี่คน", use_container_width=True):
+        selected_prompt = "วันนี้ มีนักเรียนมาโรงเรียนกี่คน สรุปภาพรวม"
+    if qp4.button("⚠️ เด็กเสี่ยง มส.", use_container_width=True):
+        selected_prompt = "มีนักเรียนคนไหนที่เสี่ยง มส. บ้าง"
+    if qp5.button("📖 ตารางเรียน ม.3/1", use_container_width=True):
+        selected_prompt = "ตารางเรียนห้อง ม.3/1 วันนี้"
+
+    st.divider()
+
+    # แสดงประวัติการสนทนา
+    chat_container = st.container()
+    with chat_container:
+        for msg in st.session_state.chat_messages:
+            role = msg["role"]
+            avatar = "👩‍💼" if role == "assistant" else "👤"
+            with st.chat_message(role, avatar=avatar):
+                st.markdown(msg["content"])
+
+    # ช่องรับข้อความ
+    chat_input_text = st.chat_input("พิมพ์คำถามของคุณที่นี่ เช่น วันนี้คาบแรกสอนวิชาอะไร, ห้อง ม.3/1 ใครขาดแถว...")
+
+    prompt_to_process = selected_prompt or chat_input_text
+
+    if prompt_to_process:
+        # บันทึกคำถามของ user
+        st.session_state.chat_messages.append({"role": "user", "content": prompt_to_process})
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(prompt_to_process)
+
+        # ตอบคำถาม
+        with st.chat_message("assistant", avatar="👩‍💼"):
+            with st.spinner("🤖 เลขาฯ AI กำลังค้นหาข้อมูลสดจากระบบโรงเรียน..."):
+                reply = st.session_state.school_engine.answer_query(
+                    query=prompt_to_process,
+                    api_key=gemini_api_key,
+                    model_name=gemini_model,
+                    chat_history=st.session_state.chat_messages,
+                )
+                st.markdown(reply)
+                st.session_state.chat_messages.append({"role": "assistant", "content": reply})
+        st.rerun()
+
+    # ปุ่มล้างแชท
+    col_clear, _ = st.columns([1, 5])
+    with col_clear:
+        if st.button("🗑️ ล้างประวัติแชท", use_container_width=True):
+            st.session_state.chat_messages = [
+                {
+                    "role": "assistant",
+                    "content": "สวัสดีครับคุณครู! ยินดีต้อนรับสู่ระบบเลขาฯ AI ประจำโรงเรียนเปรมติณสูลานนท์ สอบถามข้อมูลสดได้ทันทีครับ 👩‍💼",
+                }
+            ]
+            st.rerun()
+
+# -------------------------------------------------------------
+# แท็บที่ 3: คู่มือเชื่อมต่อ ChatGPT Custom GPTs & API
+# -------------------------------------------------------------
+with main_tab3:
+    st.markdown(
+        """
+        <div style="background: linear-gradient(135deg, #1e1b4b 0%, #4338ca 100%); color: white; padding: 20px 24px; border-radius: 14px; margin-bottom: 20px;">
+            <h3 style="margin: 0 0 6px 0; color: white;">🔌 เชื่อมต่อ ChatGPT Custom GPT & External AI Agents</h3>
+            <p style="margin: 0; font-size: 14px; color: #c7d2fe;">
+                นำระบบสารสนเทศโรงเรียนเปรมติณสูลานนท์ไปเชื่อมต่อเป็น Custom GPT บนแอป ChatGPT ในมือถือ หรือใช้งานผ่าน REST API
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.subheader("🚀 วิธีติดตั้ง Custom GPT ใน ChatGPT (4 ขั้นตอนง่ายๆ)")
+
+    step1, step2 = st.columns(2)
+    with step1:
+        st.markdown(
+            """
+            #### ขั้นตอนที่ 1: เปิดรัน API Server
+            ดับเบิ้ลคลิกไฟล์ `run_api.bat` ในโฟลเดอร์โปรเจกต์ หรือรันคำสั่ง:
+            ```bash
+            python -m uvicorn api:app --host 0.0.0.0 --port 8000
+            ```
+            ระบบจะเปิด REST API Service ที่พอร์ต `8000`
+            """
+        )
+        st.markdown(
+            """
+            #### ขั้นตอนที่ 2: สร้าง Public URL (Tunnel)
+            เพื่อให้ ChatGPT บนเซิร์ฟเวอร์ OpenAI เข้าถึงเครื่องเราได้ แนะนำให้ใช้ **Cloudflare Tunnel** (ฟรี ไม่ต้องลงทะเบียน):
+            ```bash
+            cloudflared tunnel --url http://localhost:8000
+            ```
+            จะได้ URL เช่น `https://xxxx-xxxx.trycloudflare.com`
+            """
+        )
+
+    with step2:
+        st.markdown(
+            """
+            #### ขั้นตอนที่ 3: สร้าง Custom GPT ใน ChatGPT
+            1. เข้าเว็บ [chatgpt.com](https://chatgpt.com) -> เลือก **Explore GPTs** -> **Create a GPT**
+            2. ไปที่แท็บ **Configure** ตั้งชื่อ เช่น *'เลขาฯ ร.ร.เปรมติณสูลานนท์'*
+            3. เลื่อนลงมาด้านล่างสุด กด **Create new action**
+            4. ในช่อง **Schema** ให้นำเนื้อหาจากไฟล์ `openapi.yaml` ด้านล่างไปวาง
+            5. เปลี่ยน URL ในส่วน `servers:` เป็น URL Cloudflare Tunnel ของคุณ
+            """
+        )
+        st.markdown(
+            """
+            #### ขั้นตอนที่ 4: เริ่มใช้งานในแอป ChatGPT บนมือถือ!
+            กดบันทึก (Save) แล้วเปิดแอป ChatGPT บนโทรศัพท์ สามารถพิมพ์แชท หรือกดปุ่มหูฟังเพื่อคุยด้วยเสียง (Voice Mode) ถามข้อมูลโรงเรียนได้ทันที!
+            """
+        )
+
+    st.divider()
+
+    st.subheader("📄 ไฟล์ OpenAPI Specification (Schema สำหรับ ChatGPT)")
+    st.caption("คัดลอกข้อความ YAML ด้านล่างนี้ไปวางในส่วน Schema ของ ChatGPT Actions:")
+
+    openapi_path = BASE_DIR / "openapi.yaml"
+    openapi_content = ""
+    if openapi_path.exists():
+        openapi_content = openapi_path.read_text(encoding="utf-8")
+    else:
+        # Fallback สร้าง schema จาก api.py
+        try:
+            from api import get_openapi_yaml
+            openapi_content = get_openapi_yaml()
+        except Exception:
+            openapi_content = "# กรุณารัน api.py เพื่อดู openapi.yaml"
+
+    st.code(openapi_content, language="yaml")
+
+    st.subheader("💡 ตัวอย่าง Instructions สำหรับใส่ใน Custom GPT")
+    instructions_sample = (
+        "คุณคือ 'เลขาฯ AI ประจำโรงเรียนเปรมติณสูลานนท์' ตอบคำถามคุณครูและผู้บริหารอย่างสุภาพและเป็นมิตร\n"
+        "เมื่อผู้ใช้ถามเกี่ยวกับ:\n"
+        "1. ตารางสอน หรือถามว่าคาบแรกสอนวิชาอะไร -> ให้เรียก getTeacherSchedule\n"
+        "2. การเข้าแถวหน้าเสาธง หรือถามว่าห้องไหนใครขาดแถว -> ให้เรียก getMorningAssemblyAbsent\n"
+        "3. สถิติการมาเรียนรวมทั้งโรงเรียน หรือถามว่าวันนี้มาเรียนกี่คน -> ให้เรียก getDailyAttendanceSummary\n"
+        "4. ตารางเรียนห้อง -> ให้เรียก getClassSchedule\n"
+        "5. นักเรียนเสี่ยง มส. -> ให้เรียก getAttendanceRiskStudents\n"
+        "ตอบกลับเป็นภาษาไทยพร้อมจัดรูปแบบ Markdown สวยงามเสมอ"
+    )
+    st.text_area("คัดลอกข้อความนี้ไปใส่ในช่อง Instructions ของ ChatGPT:", value=instructions_sample, height=180)
+
 # Footer
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: #94a3b8; font-size: 13px;'>"
-    "ระบบดึงข้อมูลและตรวจ ปถ.05 อัตโนมัติ • พร้อม Deploy บน Streamlit Cloud & GitHub • พัฒนาโดย DeepMind Antigravity"
+    "ระบบดึงข้อมูลและตรวจ ปถ.05 อัตโนมัติ • พร้อมระบบเลขาฯ AI & ChatGPT Assistant • โรงเรียนเปรมติณสูลานนท์"
     "</div>",
     unsafe_allow_html=True,
 )
+
