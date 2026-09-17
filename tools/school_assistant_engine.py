@@ -24,6 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 TEACHERS_CSV = BASE_DIR / "teachers.csv"
 SAMPLE_TEACHERS_CSV = BASE_DIR / "tools" / "teachers.sample.csv"
 TEACHERS_MAP_JSON = BASE_DIR / "tools" / "teachers_map.json"
+TEACHERS_SCHEDULES_CACHE_JSON = BASE_DIR / "tools" / "teachers_schedules_cache.json"
 
 THAI_DAYS = {
     0: "จันทร์",
@@ -118,9 +119,27 @@ class SchoolAssistantEngine:
         self.client = SssClient()
         self.teachers_cache: list[dict[str, str]] = []
         self.teachers_name_map: dict[str, str] = {}
+        self.schedules_cache: dict[str, Any] = {}
         self.logged_in_sessions: dict[str, dict[str, str]] = {}
         self.default_teacher_user = default_teacher_user
         self._load_teacher_accounts()
+        self._load_schedules_cache()
+
+    def _load_schedules_cache(self) -> None:
+        """โหลดตารางสอนที่แคชไว้ของครูทุกคน เพื่อการตอบสนองทันที (Instant Response < 0.001s)"""
+        if TEACHERS_SCHEDULES_CACHE_JSON.exists():
+            try:
+                with TEACHERS_SCHEDULES_CACHE_JSON.open("r", encoding="utf-8") as f:
+                    self.schedules_cache = json.load(f)
+            except Exception:
+                self.schedules_cache = {}
+
+    def _save_schedules_cache(self) -> None:
+        try:
+            with TEACHERS_SCHEDULES_CACHE_JSON.open("w", encoding="utf-8") as f:
+                json.dump(self.schedules_cache, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def _load_teacher_accounts(self) -> None:
         # 1. โหลดข้อมูลแมปชื่อครูจาก JSON
@@ -237,29 +256,42 @@ class SchoolAssistantEngine:
             target_day = "พฤหัสบดี"
 
         target, info = self.get_teacher_info(teacher_query)
+        u = target["username"]
         teacher_id = info.get("id_1", "")
         teacher_name = clean_thai_name(f"{info.get('name_1', '')} {info.get('lname_1', '')}")
         if not teacher_name or teacher_name.isspace():
             teacher_name = target.get("name", target["username"])
 
-        res = self.client.post("table_teaching.php", {"id_1": teacher_id})
+        # 1. ตรวจสอบจากแคชก่อน เพื่อความเร็วระดับมิลลิวินาที (Instant Speed < 0.001s)
+        cached_entry = self.schedules_cache.get(u)
+        if cached_entry and cached_entry.get("full_week_schedule"):
+            schedule = cached_entry["full_week_schedule"]
+            teacher_name = cached_entry.get("name") or teacher_name
+        else:
+            res = self.client.post("table_teaching.php", {"id_1": teacher_id})
+            days = ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์"]
+            schedule = {}
+            rows = re.findall(r"<tr[\s\S]*?</tr>", res, re.I)
+            for r in rows:
+                tds = re.findall(r"<td[\s\S]*?</td>", r, re.I)
+                cleaned_tds = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", td)).strip() for td in tds]
+                if not cleaned_tds:
+                    continue
+                day_match = next((d for d in days if d in cleaned_tds[0]), None)
+                if day_match:
+                    schedule[day_match] = {}
+                    for period_idx, val in enumerate(cleaned_tds[1:], start=1):
+                        val_cleaned = val.replace("&nbsp;", "").strip()
+                        if val_cleaned and val_cleaned != "-":
+                            schedule[day_match][f"ชม.{period_idx}"] = val_cleaned
 
-        days = ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์"]
-        schedule: dict[str, dict[str, str]] = {}
-
-        rows = re.findall(r"<tr[\s\S]*?</tr>", res, re.I)
-        for r in rows:
-            tds = re.findall(r"<td[\s\S]*?</td>", r, re.I)
-            cleaned_tds = [re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", td)).strip() for td in tds]
-            if not cleaned_tds:
-                continue
-            day_match = next((d for d in days if d in cleaned_tds[0]), None)
-            if day_match:
-                schedule[day_match] = {}
-                for period_idx, val in enumerate(cleaned_tds[1:], start=1):
-                    val_cleaned = val.replace("&nbsp;", "").strip()
-                    if val_cleaned and val_cleaned != "-":
-                        schedule[day_match][f"ชม.{period_idx}"] = val_cleaned
+            self.schedules_cache[u] = {
+                "username": u,
+                "name": teacher_name,
+                "full_week_schedule": schedule,
+                "updated_at": datetime.datetime.now().isoformat(),
+            }
+            self._save_schedules_cache()
 
         # กรองตามวัน
         day_schedule = schedule.get(target_day, {})
@@ -684,7 +716,37 @@ class SchoolAssistantEngine:
         if not api_key:
             api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 
-        active_user = current_user or self.default_teacher_user
+        # ตรวจจับคุณครูจากคำถาม หรือจากประวัติการสนทนาย้อนหลัง (Conversational Session Memory)
+        detected_user = None
+        q_norm = normalize_name_query(query)
+        has_name_in_q = False
+        for t in self.teachers_cache:
+            t_name = t.get("name", "")
+            if not t_name:
+                continue
+            parts = [p for p in normalize_name_query(t_name).split() if len(p) >= 3]
+            if any(p in q_norm for p in parts) or (t["username"].lower() in query.lower()):
+                has_name_in_q = True
+                detected_user = t["username"]
+                break
+
+        # ถ้าในคำถามปัจจุบันไม่มีการเอ่ยชื่อครู ให้ดูจากข้อความก่อนหน้าใน session
+        if not has_name_in_q and chat_history:
+            for msg in reversed(chat_history[-6:]):
+                if msg.get("role") == "user":
+                    m_norm = normalize_name_query(msg.get("content", ""))
+                    for t in self.teachers_cache:
+                        t_name = t.get("name", "")
+                        if not t_name:
+                            continue
+                        parts = [p for p in normalize_name_query(t_name).split() if len(p) >= 3]
+                        if any(p in m_norm for p in parts) or (t["username"].lower() in msg.get("content", "").lower()):
+                            detected_user = t["username"]
+                            break
+                    if detected_user:
+                        break
+
+        active_user = detected_user or current_user or self.default_teacher_user
 
         # ถ้ามี API Key ใช้ Gemini Function Calling
         if api_key:
@@ -821,12 +883,36 @@ class SchoolAssistantEngine:
 
         day_name, date_iso, date_thai, is_weekend, rel_label = parse_thai_day_and_date(q)
 
-        # คำถาม 1: ตารางสอน / คาบแรก / สอนวิชาอะไร
-        if any(w in q_lower for w in ["คาบแรก", "ตารางสอน", "สอนวิชาอะไร", "สอนคาบ", "สอน ม.", "สอนห้อง", "มีสอนไหม", "สอนอะไร", "สอนอะไรบ้าง"]):
+        # คำถาม 1: ตารางสอน / คาบแรก / สอนวิชาอะไร / ถามต่อเรื่องวัน
+        schedule_keywords = [
+            "คาบแรก", "ตารางสอน", "สอนวิชาอะไร", "สอนคาบ", "สอน ม.", "สอนห้อง",
+            "มีสอนไหม", "สอนอะไร", "สอนอะไรบ้าง", "ตาราง", "สอน", "คาบไหน", "มีสอน", "สอนกี่คาบ"
+        ]
+        day_tokens = ["จันทร์", "อังคาร", "พุธ", "พฤหัส", "ศุกร์", "พรุ่งนี้", "มะรืน", "เมื่อวาน"]
+        is_sched_intent = any(w in q_lower for w in schedule_keywords) or (
+            any(d in q for d in day_tokens) and any(x in q for x in ["ล่ะ", "ละ", "วัน", "คาบ", "ตาราง"])
+        )
+
+        if is_sched_intent:
             if is_weekend:
                 return f"🏖️ **วัน{day_name} (วันที่ {date_thai})** เป็นวันหยุดสุดสัปดาห์ ไม่มีตารางเรียนตารางสอนครับ"
 
-            sch = self.get_teacher_schedule(teacher_query=q, day_name=day_name)
+            # ตรวจสอบว่าใน q มีชื่อครูระบุไว้ชัดเจนหรือไม่ ถ้าไม่มี ให้ใช้ current_user จากโปรไฟล์หรือประวัติแชท
+            t_target = q
+            has_explicit_teacher = False
+            for t in self.teachers_cache:
+                t_name = t.get("name", "")
+                if not t_name:
+                    continue
+                parts = [p for p in normalize_name_query(t_name).split() if len(p) >= 3]
+                if any(p in normalize_name_query(q) for p in parts) or t["username"].lower() in q.lower():
+                    has_explicit_teacher = True
+                    t_target = t["username"]
+                    break
+            if not has_explicit_teacher:
+                t_target = current_user
+
+            sch = self.get_teacher_schedule(teacher_query=t_target, day_name=day_name)
             
             day = sch["query_day"]
             teacher = sch["teacher_name"]

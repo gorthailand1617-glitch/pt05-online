@@ -573,7 +573,11 @@ with main_tab2:
         st.caption("💡 **หมายเหตุ:** หากไม่มี API Key หรือ Gemini API มีการขัดข้อง ระบบจะใช้ Fast Engine ดึงข้อมูลสดจากระบบ SSS ให้ทันที 100%")
 
     # แผงคำถามด่วน (Quick Prompts)
-    st.markdown("##### ⚡ คำถามด่วนที่พบบ่อย (คลิกเพื่อถามทันที)")
+    c_bar1, c_bar2 = st.columns([3, 2])
+    with c_bar1:
+        st.markdown("##### ⚡ คำถามด่วนที่พบบ่อย (คลิกเพื่อถามทันที)")
+    with c_bar2:
+        st.caption(f"👤 คุณครูผู้ใช้งาน: **{chosen_teacher}** *(เปลี่ยนได้ที่แผงตั้งค่าด้านบน)*")
     qp1, qp2, qp3, qp4, qp5 = st.columns(5)
     
     selected_prompt = None
