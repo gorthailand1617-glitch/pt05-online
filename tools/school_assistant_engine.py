@@ -23,6 +23,7 @@ from pt05_tool import SssClient, parse_forms
 BASE_DIR = Path(__file__).resolve().parent.parent
 TEACHERS_CSV = BASE_DIR / "teachers.csv"
 SAMPLE_TEACHERS_CSV = BASE_DIR / "tools" / "teachers.sample.csv"
+TEACHERS_MAP_JSON = BASE_DIR / "tools" / "teachers_map.json"
 
 THAI_DAYS = {
     0: "จันทร์",
@@ -51,25 +52,85 @@ def clean_html_text(raw_html: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def clean_thai_name(name: str) -> str:
+    cleaned = clean_html_text(name)
+    cleaned = re.sub(r"^(นาย|นางสาว|นาง)\1+", r"\1", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def normalize_name_query(text: str) -> str:
+    s = (text or "").replace("ฏ", "ฎ")
+    prefixes = [
+        "ฉันคือครู", "ฉันชื่อครู", "ฉันคือคุณครู", "ฉันชื่อคุณครู",
+        "ฉันคืออาจารย์", "ฉันชื่ออาจารย์", "ฉันคือ", "ฉันชื่อ",
+        "คุณครู", "ครู", "อาจารย์", "อ.", "นาย", "นางสาว", "นาง"
+    ]
+    for p in prefixes:
+        s = s.replace(p, " ")
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def parse_thai_day_and_date(query: str) -> tuple[str, str, str, bool, str]:
+    """คืนค่า (ชื่อวัน เช่น 'ศุกร์', YYYY-MM-DD, DD/MM/YYYY_THAI, เป็นวันหยุดหรือไม่, คำระบุสัมพัทธ์ เช่น 'พรุ่งนี้')"""
+    now = datetime.datetime.now()
+    q = (query or "").strip()
+    rel_label = "วันนี้"
+    if "พรุ่งนี้" in q or "วันพรุ่งนี้" in q:
+        target_date = now + datetime.timedelta(days=1)
+        rel_label = "พรุ่งนี้"
+    elif "มะรืน" in q or "มะรืนนี้" in q:
+        target_date = now + datetime.timedelta(days=2)
+        rel_label = "มะรืนนี้"
+    elif "เมื่อวาน" in q or "เมื่อวานนี้" in q:
+        target_date = now - datetime.timedelta(days=1)
+        rel_label = "เมื่อวานนี้"
+    else:
+        day_matched = None
+        for thai_d in ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "พฤหัส", "ศุกร์", "เสาร์", "อาทิตย์"]:
+            if thai_d in q:
+                day_matched = "พฤหัสบดี" if thai_d == "พฤหัส" else thai_d
+                break
+        if day_matched:
+            days_order = ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"]
+            delta_days = days_order.index(day_matched) - now.weekday()
+            target_date = now + datetime.timedelta(days=delta_days)
+            rel_label = f"วัน{day_matched}"
+        else:
+            target_date = now
+
+    b_yr = target_date.year + 543
+    date_iso = target_date.strftime("%Y-%m-%d")
+    date_thai = f"{target_date.day:02d}/{target_date.month:02d}/{b_yr}"
+    raw_day_name = THAI_DAYS.get(target_date.weekday(), "จันทร์")
+    day_name = "พฤหัสบดี" if raw_day_name == "พฤหัส" else raw_day_name
+    is_weekend = target_date.weekday() in (5, 6)
+    return day_name, date_iso, date_thai, is_weekend, rel_label
+
+
 def get_current_thai_date() -> tuple[str, str, str]:
     """คืนค่า (YYYY-MM-DD, DD/MM/YYYY_THAI, ชื่อวันภาษาไทย)"""
-    now = datetime.datetime.now()
-    # ปี พ.ศ.
-    buddhist_year = now.year + 543
-    date_iso = now.strftime("%Y-%m-%d")
-    date_thai = f"{now.day:02d}/{now.month:02d}/{buddhist_year}"
-    day_name = THAI_DAYS.get(now.weekday(), "จันทร์")
+    day_name, date_iso, date_thai, _, _ = parse_thai_day_and_date("วันนี้")
     return date_iso, date_thai, day_name
 
 
 class SchoolAssistantEngine:
-    def __init__(self) -> None:
+    def __init__(self, default_teacher_user: str = "ptn1617") -> None:
         self.client = SssClient()
         self.teachers_cache: list[dict[str, str]] = []
+        self.teachers_name_map: dict[str, str] = {}
         self.logged_in_sessions: dict[str, dict[str, str]] = {}
+        self.default_teacher_user = default_teacher_user
         self._load_teacher_accounts()
 
     def _load_teacher_accounts(self) -> None:
+        # 1. โหลดข้อมูลแมปชื่อครูจาก JSON
+        if TEACHERS_MAP_JSON.exists():
+            try:
+                with TEACHERS_MAP_JSON.open("r", encoding="utf-8") as f:
+                    self.teachers_name_map = json.load(f)
+            except Exception:
+                pass
+
         file_to_load = TEACHERS_CSV if TEACHERS_CSV.exists() else SAMPLE_TEACHERS_CSV
         if not file_to_load.exists():
             return
@@ -79,40 +140,67 @@ class SchoolAssistantEngine:
                 for r in reader:
                     username = r.get("username", "").strip()
                     password = r.get("password", "").strip()
-                    name = r.get("name", "").strip()
+                    name = r.get("name", "").strip() or self.teachers_name_map.get(username, "")
+                    if username == "ptn1617" and not name:
+                        name = "กรกฎ รัตนะโช"
                     if username and password:
+                        cleaned_n = clean_thai_name(name)
                         self.teachers_cache.append({
                             "username": username,
                             "password": password,
-                            "name": name,
+                            "name": cleaned_n,
                         })
+                        if cleaned_n:
+                            self.teachers_name_map[username] = cleaned_n
         except Exception:
             pass
 
-    def get_teacher_info(self, teacher_query: str) -> tuple[dict[str, str], dict[str, str]]:
-        """ค้นหาและล็อกอินครูจาก username หรือชื่อครู"""
-        target = None
-        q = teacher_query.strip().lower()
+    def get_teacher_display_name(self, username: str) -> str:
+        return self.teachers_name_map.get(username, username)
 
-        # 1. ลองหาจาก cache
+    def get_teacher_info(self, teacher_query: str = "", default_user: Optional[str] = None) -> tuple[dict[str, str], dict[str, str]]:
+        """ค้นหาและล็อกอินครูจาก username หรือชื่อครู (รองรับคำว่า 'ฉัน' โดยใช้ default_user)"""
+        target = None
+        q = (teacher_query or "").strip()
+        q_norm = normalize_name_query(q)
+        def_user = default_user or self.default_teacher_user
+
+        # ถ้า query เป็นคำแทนตัวเอง หรือว่างเปล่า
+        if not q or q in ["ฉัน", "ผม", "เรา", "หนู", "ครู", "ตัวฉัน", "ครูเอง"]:
+            q = def_user
+            q_norm = def_user.lower()
+
+        # 1. ลองหาจาก username ตรงตัว
         for t in self.teachers_cache:
-            if q == t["username"].lower() or (t["name"] and q in t["name"].lower()):
+            if q.lower() == t["username"].lower() or t["username"].lower() in q.lower():
                 target = t
                 break
 
-        # ถ้าไม่เจอ ลองหา match บางส่วน
-        if not target and self.teachers_cache:
+        # 2. ค้นหาจากชื่อครู (รองรับ ฏ/ฎ และการตัดคำ)
+        if not target and q_norm:
+            best_len = 0
             for t in self.teachers_cache:
-                if q in t["username"].lower():
+                t_name = t.get("name", "")
+                if not t_name:
+                    continue
+                t_norm = normalize_name_query(t_name)
+                parts = [p for p in t_norm.split() if len(p) >= 3]
+                for p in parts:
+                    if p in q_norm or q_norm in p:
+                        if len(p) > best_len:
+                            best_len = len(p)
+                            target = t
+
+        # 3. Fallback: ถ้ายังไม่พบ ให้ใช้ def_user (ptn1617 ครูกรกฎ)
+        if not target:
+            for t in self.teachers_cache:
+                if t["username"].lower() == def_user.lower():
                     target = t
                     break
-
-        if not target:
-            # Fallback ใช้บัญชีแรกในระบบ
-            if self.teachers_cache:
+            if not target and self.teachers_cache:
                 target = self.teachers_cache[0]
-            else:
-                target = {"username": "ptn101", "password": "101", "name": "นายสถิตย์ ศรีวัชรกุล"}
+            elif not target:
+                target = {"username": "ptn1617", "password": "1617", "name": "กรกฎ รัตนะโช"}
 
         # ล็อกอิน
         user = target["username"]
@@ -143,11 +231,16 @@ class SchoolAssistantEngine:
         :param period: คาบ เช่น 'ชม.1', '1', 'คาบแรก'
         """
         _, current_thai, current_day = get_current_thai_date()
-        target_day = day_name.strip() if day_name else current_day
+        raw_target_day = day_name.strip() if day_name else current_day
+        target_day = raw_target_day.replace("วัน", "").strip()
+        if target_day == "พฤหัส":
+            target_day = "พฤหัสบดี"
 
         target, info = self.get_teacher_info(teacher_query)
         teacher_id = info.get("id_1", "")
-        teacher_name = clean_html_text(f"{info.get('name_1', '')} {info.get('lname_1', '')}")
+        teacher_name = clean_thai_name(f"{info.get('name_1', '')} {info.get('lname_1', '')}")
+        if not teacher_name or teacher_name.isspace():
+            teacher_name = target.get("name", target["username"])
 
         res = self.client.post("table_teaching.php", {"id_1": teacher_id})
 
@@ -582,6 +675,7 @@ class SchoolAssistantEngine:
         api_key: Optional[str] = None,
         model_name: str = "gemini-3.7-flash",
         chat_history: Optional[list[dict[str, Any]]] = None,
+        current_user: Optional[str] = None,
     ) -> str:
         """
         ตอบคำถามผู้ใช้ผ่าน Gemini Function Calling หรือ Rule-based Fallback
@@ -590,17 +684,19 @@ class SchoolAssistantEngine:
         if not api_key:
             api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 
+        active_user = current_user or self.default_teacher_user
+
         # ถ้ามี API Key ใช้ Gemini Function Calling
         if api_key:
             try:
-                return self._call_gemini_with_tools(query, api_key, model_name, chat_history)
+                return self._call_gemini_with_tools(query, api_key, model_name, chat_history, active_user)
             except Exception as e:
                 # ถ้า Gemini API เกิดข้อผิดพลาด ให้ fallback เป็น rule-based ทันที
-                fb = self._rule_based_answer(query)
+                fb = self._rule_based_answer(query, active_user)
                 return f"{fb}\n\n*(หมายเหตุ: Gemini API เกิดข้อขัดข้องชั่วคราว [{e}] จึงแสดงผลลัพธ์ผ่านระบบเอนจินภายใน)*"
 
         # โหมดไม่มี API Key: ใช้ Rule-based อัจฉริยะ
-        return self._rule_based_answer(query)
+        return self._rule_based_answer(query, active_user)
 
     def _call_gemini_with_tools(
         self,
@@ -608,13 +704,39 @@ class SchoolAssistantEngine:
         api_key: str,
         model_name: str,
         chat_history: Optional[list[dict[str, Any]]] = None,
+        current_user: str = "ptn1617",
     ) -> str:
         import urllib.request
+        import time
+
+        def _post_with_retry(request_obj: urllib.request.Request, max_retries: int = 2) -> dict[str, Any]:
+            for attempt in range(max_retries):
+                try:
+                    with urllib.request.urlopen(request_obj, timeout=30) as resp:
+                        return json.loads(resp.read().decode("utf-8"))
+                except urllib.error.HTTPError as he:
+                    if he.code in (503, 429) and attempt < max_retries - 1:
+                        time.sleep(1.5)
+                        continue
+                    raise he
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        cur_iso, cur_thai, cur_day = get_current_thai_date()
+        tom_day, tom_iso, tom_thai, _, _ = parse_thai_day_and_date("พรุ่งนี้")
+        curr_teacher_name = self.get_teacher_display_name(current_user)
+
         system_prompt = (
             "คุณคือ 'เลขาฯ AI ประจำโรงเรียนเปรมติณสูลานนท์' (School AI Secretary) "
             "มีหน้าที่ตอบคำถามของคุณครูและผู้บริหารเกี่ยวกับข้อมูลโรงเรียนอย่างสุภาพ อบอุ่น ถูกต้อง และเป็นมืออาชีพ\n"
+            f"- วันนี้คือ: วัน{cur_day} ที่ {cur_thai}\n"
+            f"- พรุ่งนี้คือ: วัน{tom_day} ที่ {tom_thai}\n"
+            f"- คุณครูผู้ใช้งานปัจจุบัน (หากผู้ใช้กล่าวถึง 'ฉัน' หรือ 'ผม'): '{current_user}' ({curr_teacher_name})\n"
+            "- ตัวอย่างรายชื่อคุณครูในระบบ:\n"
+            "  * 'ptn1617' คือ ครูกรกฎ รัตนะโช\n"
+            "  * 'ptn101' คือ ครูสถิตย์ ศรีวัชรกุล\n"
+            "  * 'ptn122' คือ ครูวัฒนา มีศิลป์\n"
+            "  * 'ptn115' คือ ครูปิยะทัศน์ แสงสว่าง\n"
+            "  * 'ptn116' คือ ครูกัลญา สมประสงค์\n"
             "คุณมีฟังก์ชันสำหรับดึงข้อมูลสดจากระบบ SSS โรงเรียนเปรมติณสูลานนท์ กรุณาเรียกใช้ Tool เพื่อดึงข้อมูลจริงทุกครั้ง\n"
             "เมื่อได้ข้อมูลจาก Tool แล้ว ให้สรุปตอบเป็นภาษาไทยพร้อมจัดรูปแบบ Markdown (เช่น สัญลักษณ์หัวข้อย่อย, ตัวหนา, อีโมจิ) ให้อ่านง่าย สบายตา"
         )
@@ -642,8 +764,7 @@ class SchoolAssistantEngine:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        data = _post_with_retry(req)
 
         candidate = data.get("candidates", [{}])[0]
         content_obj = candidate.get("content", {})
@@ -686,27 +807,26 @@ class SchoolAssistantEngine:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req2, timeout=30) as resp2:
-            data2 = json.loads(resp2.read().decode("utf-8"))
+        data2 = _post_with_retry(req2)
 
         candidate2 = data2.get("candidates", [{}])[0]
         parts2 = candidate2.get("content", {}).get("parts", [])
         final_text = "".join(p.get("text", "") for p in parts2 if "text" in p)
         return final_text.strip()
 
-    def _rule_based_answer(self, query: str) -> str:
+    def _rule_based_answer(self, query: str, current_user: str = "ptn1617") -> str:
         """ระบบตอบคำถามอัจฉริยะอัตโนมัติ (Rule-based Fast Mode)"""
-        q = query.strip().lower()
+        q = (query or "").strip()
+        q_lower = q.lower()
+
+        day_name, date_iso, date_thai, is_weekend, rel_label = parse_thai_day_and_date(q)
 
         # คำถาม 1: ตารางสอน / คาบแรก / สอนวิชาอะไร
-        if any(w in q for w in ["คาบแรก", "ตารางสอน", "สอนวิชาอะไร", "สอนคาบ", "สอน ม.", "สอนห้อง"]):
-            # หาชื่อครู
-            teacher_name = ""
-            for t in self.teachers_cache:
-                if t["name"] and any(part in q for part in t["name"].split() if len(part) > 3):
-                    teacher_name = t["username"]
-                    break
-            sch = self.get_teacher_schedule(teacher_query=teacher_name, period="ชม.1")
+        if any(w in q_lower for w in ["คาบแรก", "ตารางสอน", "สอนวิชาอะไร", "สอนคาบ", "สอน ม.", "สอนห้อง", "มีสอนไหม", "สอนอะไร", "สอนอะไรบ้าง"]):
+            if is_weekend:
+                return f"🏖️ **วัน{day_name} (วันที่ {date_thai})** เป็นวันหยุดสุดสัปดาห์ ไม่มีตารางเรียนตารางสอนครับ"
+
+            sch = self.get_teacher_schedule(teacher_query=q, day_name=day_name)
             
             day = sch["query_day"]
             teacher = sch["teacher_name"]
@@ -714,15 +834,18 @@ class SchoolAssistantEngine:
             day_items = sch["day_schedule"]
 
             res = f"📅 **ข้อมูลตารางสอนของ {teacher}**\n\n"
-            res += f"- **ประจำวัน:** วัน{day} (วันที่ {sch['current_date']})\n"
-            res += f"- 🔔 **คาบแรก (ชม.1):** **{first_p}**\n\n"
+            rel_str = f" ({rel_label} - วันที่ {date_thai})" if rel_label != f"วัน{day}" else f" (วันที่ {date_thai})"
+            res += f"- **ประจำวัน:** วัน{day}{rel_str}\n"
+
+            if "คาบแรก" in q_lower:
+                res += f"- 🔔 **คาบแรก (ชม.1):** **{first_p}**\n\n"
             
             if day_items:
-                res += f"**ตารางสอนตลอดทั้งวัน{day}:**\n"
+                res += f"**ตารางสอนตลอดทั้งวัน{day} (มีสอนทั้งหมด {len(day_items)} คาบ):**\n"
                 for p, subj in day_items.items():
                     res += f"- `{p}` : {subj}\n"
             else:
-                res += f"- วัน{day} ไม่มีตารางสอน (เป็นวันว่าง)\n"
+                res += f"- วัน{day} ไม่มีตารางสอน (เป็นวันว่างของ{teacher})\n"
             return res
 
         # คำถาม 2: ขาดแถว / กิจกรรมหน้าเสาธง

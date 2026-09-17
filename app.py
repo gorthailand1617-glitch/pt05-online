@@ -533,8 +533,8 @@ with main_tab2:
     )
 
     # แผงตั้งค่า AI
-    with st.expander("⚙️ ตั้งค่าระบบ AI (Google Gemini API / Fast Engine)", expanded=False):
-        c_set1, c_set2 = st.columns([3, 2])
+    with st.expander("⚙️ ตั้งค่าระบบ AI และโปรไฟล์ครู (Google Gemini API / Fast Engine)", expanded=False):
+        c_set1, c_set2, c_set3 = st.columns([3, 2, 3])
         with c_set1:
             gemini_api_key = st.text_input(
                 "🔑 Google Gemini API Key (ไม่บังคับ)",
@@ -553,7 +553,24 @@ with main_tab2:
                 gemini_model = st.text_input("ระบุชื่อโมเดล", value="gemini-3.7-flash")
             else:
                 gemini_model = model_choice
-        st.caption("💡 **หมายเหตุ:** หากไม่มี API Key ระบบจะใช้ระบบค้นหาอัจฉริยะดึงข้อมูลสดจากระบบ SSS ตอบให้เหมือนกัน 100%")
+        with c_set3:
+            eng = st.session_state.school_engine
+            teacher_opts = [
+                f"{t['username']} - {t['name'] or t['username']}" for t in eng.teachers_cache
+            ] or ["ptn1617 - กรกฎ รัตนะโช"]
+            default_idx = 0
+            for idx, opt in enumerate(teacher_opts):
+                if "ptn1617" in opt:
+                    default_idx = idx
+                    break
+            chosen_teacher = st.selectbox(
+                "👤 คุณครูผู้ใช้งาน (สำหรับคำว่า 'ฉัน')",
+                teacher_opts,
+                index=default_idx,
+                help="เลือกบัญชีคุณครูของคุณ เพื่อให้เลขาฯ AI ทราบว่า 'ฉัน' หรือ 'ผม' คือครูท่านใด",
+            )
+            selected_user = chosen_teacher.split(" - ")[0].strip() if chosen_teacher else "ptn1617"
+        st.caption("💡 **หมายเหตุ:** หากไม่มี API Key หรือ Gemini API มีการขัดข้อง ระบบจะใช้ Fast Engine ดึงข้อมูลสดจากระบบ SSS ให้ทันที 100%")
 
     # แผงคำถามด่วน (Quick Prompts)
     st.markdown("##### ⚡ คำถามด่วนที่พบบ่อย (คลิกเพื่อถามทันที)")
@@ -601,6 +618,7 @@ with main_tab2:
                     api_key=gemini_api_key,
                     model_name=gemini_model,
                     chat_history=st.session_state.chat_messages,
+                    current_user=selected_user,
                 )
                 st.markdown(reply)
                 st.session_state.chat_messages.append({"role": "assistant", "content": reply})
